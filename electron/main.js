@@ -3,8 +3,23 @@ const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const { spawn } = require('child_process');
-const ffmpegStatic = require('ffmpeg-static');
-const ffprobeStatic = require('ffprobe-static');
+// Lazily require heavy static binaries to speed cold start
+let ffmpegStatic = null;
+let ffprobeStatic = null;
+
+function getFFmpegPath() {
+  try {
+    if (!ffmpegStatic) ffmpegStatic = require('ffmpeg-static');
+  } catch {}
+  return binPathFromStatic(ffmpegStatic, 'ffmpeg');
+}
+
+function getFFprobePath() {
+  try {
+    if (!ffprobeStatic) ffprobeStatic = require('ffprobe-static');
+  } catch {}
+  return binPathFromStatic(ffprobeStatic, 'ffprobe');
+}
 
 function binPathFromStatic(mod, fallbackName){
   try {
@@ -226,7 +241,7 @@ ipcMain.handle(IPC.openFileDialog, async () => {
 ipcMain.handle(IPC.analyze, async (_event, inputPath) => {
   return new Promise((resolve, reject) => {
     const args = ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath];
-    const ffprobe = binPathFromStatic(ffprobeStatic, 'ffprobe');
+    const ffprobe = getFFprobePath();
     const proc = spawn(ffprobe, args, { windowsHide: true });
     let out = '';
     let err = '';
@@ -404,7 +419,7 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
   let audioCount = 0;
   try {
     const argsProbe = ['-v', 'error', '-print_format', 'json', '-show_streams', inputPath];
-    const ffprobe = binPathFromStatic(ffprobeStatic, 'ffprobe');
+    const ffprobe = getFFprobePath();
     const info = await new Promise((resolve, reject) => {
       const p = spawn(ffprobe, argsProbe, { windowsHide: true });
       let out=''; let err='';
@@ -427,7 +442,7 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
   args.unshift('-progress', 'pipe:1', '-nostats');
 
   return await new Promise((resolve, reject) => {
-    const ffmpeg = binPathFromStatic(ffmpegStatic, 'ffmpeg');
+    const ffmpeg = getFFmpegPath();
     const proc = spawn(ffmpeg, args, { windowsHide: true });
     currentExportProc = proc;
     let err = '';
@@ -493,7 +508,7 @@ ipcMain.handle(GEN_WAVEFORM, async (_event, opts) => {
   await fsPromises.mkdir(outDir, { recursive: true });
   const base = path.parse(inputPath).name;
   const outPath = path.join(outDir, `${base}_a${streamIndex}_${width}x${height}_${Date.now()}.png`);
-  const ffmpeg = binPathFromStatic(ffmpegStatic, 'ffmpeg');
+  const ffmpeg = getFFmpegPath();
   // If a time range is provided, trim before generating the waveform so the
   // visual matches the selected segment instead of stretching the full clip
   const timeTrim = (typeof startSec === 'number' || typeof endSec === 'number');
@@ -505,9 +520,8 @@ ipcMain.handle(GEN_WAVEFORM, async (_event, opts) => {
     parts.push(`atrim=${range}`);
     parts.push('asetpts=PTS-STARTPTS');
   }
-  // Apply gain in dB if provided so waveform amplitude reflects lane loudness
+  // Apply lane gain only when non-zero so visualization reflects user gain
   if (typeof gainDb === 'number' && isFinite(gainDb) && gainDb !== 0) {
-    // FFmpeg volume filter accepts dB via dB flag
     parts.push(`volume=${gainDb}dB`);
   }
   parts.push(`showwavespic=s=${width}x${height}:colors=${color}`);
@@ -536,7 +550,7 @@ ipcMain.handle(GEN_THUMBS, async (_event, opts) => {
   await fsPromises.mkdir(outDir, { recursive: true });
   const base = path.parse(inputPath).name;
   const outPath = path.join(outDir, `${base}_thumbs_${cols}x1_${Date.now()}.png`);
-  const ffmpeg = binPathFromStatic(ffmpegStatic, 'ffmpeg');
+  const ffmpeg = getFFmpegPath();
   const vf = `thumbnail,scale=${width}:${height},tile=${cols}x1`;
   const args = [
     '-y',
@@ -561,7 +575,7 @@ ipcMain.handle(PREP_AUDIO, async (_event, opts) => {
   // Probe streams to count audio tracks
   const info = await new Promise((resolve, reject) => {
     const args = ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath];
-    const ffprobe = binPathFromStatic(ffprobeStatic, 'ffprobe');
+    const ffprobe = getFFprobePath();
     const proc = spawn(ffprobe, args, { windowsHide: true });
     let out = '';
     let err = '';
@@ -581,7 +595,7 @@ ipcMain.handle(PREP_AUDIO, async (_event, opts) => {
   const outDir = path.join(userDir, 'cache', 'atracks');
   await fsPromises.mkdir(outDir, { recursive: true });
   const base = path.parse(inputPath).name;
-  const ffmpeg = binPathFromStatic(ffmpegStatic, 'ffmpeg');
+  const ffmpeg = getFFmpegPath();
   const tracks = [];
   for (let i=0;i<streams.length;i++){
     const ts = Date.now();

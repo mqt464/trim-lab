@@ -87,10 +87,14 @@ body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-
 .tracks{ -ms-overflow-style: none; scrollbar-width: none; }
 .tracks::-webkit-scrollbar{ width:0; height:0; }
 .track-row{ display:grid; grid-template-columns: var(--head-w) 1fr; min-height:var(--track-h); border-bottom:1px solid var(--border); }
+.track-row.video-row{ /* reverted: use default track height */ }
+.track-row.audio-row{ /* reverted: use default track height */ }
 .track-head{ background:#0e121b; border-right:1px solid var(--border); display:flex; align-items:center; gap:6px; padding:6px 10px; color:#cbd4f2; white-space:nowrap; width: var(--head-w); }
 .track-head .id{ font-weight:700; width:32px; min-width:32px; height:22px; display:flex; align-items:center; justify-content:center; background:#0a0e16; border:1px solid var(--border); }
 .track-head .tog{ font-size:11px; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border); background:#0c111a; color:#b8c3e8; }
 .track-lane{ position:relative; height:var(--track-h); background:var(--panel-3); overflow:hidden; }
+.track-row.video-row .track-lane{ /* reverted */ }
+.track-row.audio-row .track-lane{ /* reverted */ }
 .lane{ position:relative; height:var(--track-h); margin-right:0; padding:0 var(--lane-pad-x); }
 .video-lane{ background:var(--blue); border:1px solid #1f2740; }
 .video-lane::before{ content:""; position:absolute; inset:0; background:repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 120px); }

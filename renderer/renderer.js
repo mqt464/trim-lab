@@ -257,6 +257,16 @@ function attachMasterRangeDrag() {
   function startDrag(which, e){
     e.preventDefault();
     document.body.classList.add('dragging');
+    // Begin trick-play preview while dragging handles
+    let wasPlaying = false;
+    try {
+      wasPlaying = !!state.videoEngine?.isPlaying?.();
+      // Pause split audio if currently playing to avoid drift
+      if (wasPlaying && Array.isArray(state.splitEls)) {
+        state.splitEls.forEach(el => { try { el.pause(); } catch {} });
+      }
+      state.videoEngine?.beginTrickPlay?.({ hz: 20 });
+    } catch {}
     const move = (ev)=>{
       const p = pctFromEvent(ev);
       if(which === 'in'){
@@ -265,9 +275,40 @@ function attachMasterRangeDrag() {
         state.outPct = Math.max(Math.min(100, p), state.inPct + 0.1);
       }
       apply();
+      // Live preview: show frame at the current handle time
+      try {
+        const dur = Math.max(0, Number(state.durationSec) || 0);
+        const t = dur * ((which === 'in' ? state.inPct : state.outPct) / 100);
+        state.resumeSec = t;
+        const tl = document.getElementById('transportTime');
+        if (tl){ const d = new Date(Math.max(0,t)*1000).toISOString().substr(11,8); tl.textContent = d; }
+        state.videoEngine?.updateTrickTarget?.(t);
+      } catch {}
     };
     const up = async ()=>{
       document.body.classList.remove('dragging');
+      // End trick-play; resume playback if it was playing
+      try { state.videoEngine?.endTrickPlay?.({ resume: false }); } catch {}
+      // Land exactly on the final handle position
+      try {
+        if (typeof state.resumeSec === 'number') {
+          try { state.videoEngine?.scrubTo?.(state.resumeSec); } catch {}
+          if (!wasPlaying && Array.isArray(state.splitEls)) {
+            // Keep split audio paused but align times for next play
+            for (const el of state.splitEls) { try { el.currentTime = state.resumeSec; } catch {} }
+          }
+        }
+      } catch {}
+      if (wasPlaying) {
+        try {
+          // Ensure video resumes from the previewed position
+          if (Array.isArray(state.splitEls)) {
+            await state.mediaCtx?.resume?.();
+            for (const el of state.splitEls) { try { el.currentTime = state.resumeSec; await el.play(); } catch {} }
+          }
+          state.videoEngine?.play?.();
+        } catch {}
+      }
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
     };
@@ -403,91 +444,103 @@ async function loadFile(filePath) {
   const footerNameEl = $('#footerName');
   if (footerNameEl) footerNameEl.textContent = baseName;
   $('#dropHint').style.display = 'none';
-  await analyze(filePath);
-  // Master range: full clip on load
-  state.inPct = 0; state.outPct = 100;
-  if (typeof state.updateMasterRange === 'function') state.updateMasterRange();
-  // Hide default ruler labels (0-30s etc.) and clear duration flag
-  document.querySelectorAll('.ruler .labels:not(.labels-dyn)').forEach(el => { el.style.display = 'none'; });
-  const tlEl = document.querySelector('.timeline');
-  if (tlEl) tlEl.removeAttribute('data-duration');
-  // Ensure video lane exists and is set to file name
-  ensureVideoLane(baseName);
-  // Generate thumbnail strip for video lane based on lane width (adaptive columns)
-  try {
-    await ensureAdaptiveVideoThumbnails(filePath);
-  } catch (e) { console.warn('Thumbnail generation failed', e); }
 
-  // Start demux & prepare engine (Option B foundation)
-  state.demuxer?.dispose?.();
-  state.videoEngine?.dispose?.();
+  // Tear down any previous engines immediately and bootstrap the new video source first
+  try { state.demuxer?.dispose?.(); } catch {}
+  try { state.videoEngine?.dispose?.(); } catch {}
   try { (state.audioEngines||[]).forEach(e=>e?.stop?.()); } catch {}
   state.audioEngines = [];
   state.audioTrackIds = [];
   const canvas = document.getElementById('videoCanvas');
   state.videoEngine = new VideoEngine(canvas);
   state.audioEngine = new AudioEngine();
-  // set native video source for playback
+  // Provide video immediately for instant first frame; keep audio unmuted until split audio is ready
   try { state.videoEngine.setSourceFile(filePath); } catch {}
-  // Setup MediaElementAudioSource pipeline only if WebCodecs is not available
-  try {
-    const canWCAudio = ('AudioDecoder' in window);
-    const v = state.videoEngine.getMediaElement();
-    // We will use robust split-audio demux; always mute the element and mix lanes in WebAudio
-    v.muted = true;
-    if (!state.mediaCtx) {
-      state.mediaCtx = new (window.AudioContext || window.webkitAudioContext)();
-      state.mediaMaster = state.mediaCtx.createGain();
-      state.mediaMaster.gain.value = 1;
-      state.mediaMaster.connect(state.mediaCtx.destination);
-    }
-    // Prepare per-lane audio files via main process
-    const { tracks } = await window.trimlab.prepareAudioTracks({ inputPath: filePath, sampleRate: 48000, channels: 2 }) || { tracks: [] };
-    // Build per-lane elements and gain nodes
-    state.splitEls = [];
-    state.splitGains = [];
-    for (let i=0;i<tracks.length;i++){
-      const el = document.createElement('audio');
-      el.preload = 'auto'; el.muted = false; el.volume = 1; el.src = 'file:///' + String(tracks[i]).replace(/\\/g,'/');
-      const src = state.mediaCtx.createMediaElementSource(el);
-      const g = state.mediaCtx.createGain(); g.gain.value = 1;
-      src.connect(g); g.connect(state.mediaMaster);
-      state.splitEls.push(el);
-      state.splitGains.push(g);
-    }
-  } catch {}
-  // Provide video fallback URL immediately for preview features
   if (state.videoEngine) { state.videoEngine._fallbackFile = 'file:///' + filePath.replace(/\\/g,'/'); }
+
   // Ensure transport end handler is connected when engine is created
   const btnEl = document.getElementById('btnPlay');
   const onEndedInit = () => {
-    try { state.demuxer.stopExtract(); } catch {}
-    state.audioEngine.stop();
-    state.videoEngine?.stop?.();
+    try { state.demuxer?.stopExtract?.(); } catch {}
+    try { state.audioEngine.stop(); } catch {}
+    try { state.videoEngine?.stop?.(); } catch {}
     cancelAnimationFrame(window.__trimlabRAF || 0);
     if (btnEl) btnEl.textContent = 'Play';
   };
   state.audioEngine.onEnded = onEndedInit;
-  let MP4BoxMod = null;
-  try {
-    MP4BoxMod = await import('../node_modules/mp4box/dist/mp4box.all.js');
-  } catch (e) {
-    console.error('Failed to load MP4Box module', e);
-  }
-  state.demuxer = new MP4Demuxer(filePath, MP4BoxMod);
-  
-  state.demuxer.onReady = (info) => {
-    state.videoEngine?.onDemuxReady(info, state.demuxer);
-    const vtrack = info.tracks.find(t => t.type === 'video') || info.tracks.find(t => t.video);
-    // Always route only video to videoEngine; audio handled via split media elements
-    state.demuxer.onSamples = (id, samples) => {
-      if (vtrack && id === vtrack.id) state.videoEngine.onSamples(id, samples);
-    };
-  };
-  state.demuxer.onError = (err) => {
-    console.error('Demux error', err);
-  };
-  state.demuxer.start();
+
+  // Optimistically set up the lane and schedule thumbnails without blocking
+  ensureVideoLane(baseName);
+  try { scheduleAdaptiveVideoThumbnails(filePath, 80); } catch {}
+
+  // Asynchronously analyze metadata (duration, streams) and render lanes when ready
+  (async () => {
+    try {
+      await analyze(filePath);
+      // Master range: full clip on load once we know duration
+      state.inPct = 0; state.outPct = 100;
+      if (typeof state.updateMasterRange === 'function') state.updateMasterRange();
+      // Hide default ruler labels (0-30s etc.) and clear duration flag
+      document.querySelectorAll('.ruler .labels:not(.labels-dyn)').forEach(el => { el.style.display = 'none'; });
+      const tlEl = document.querySelector('.timeline');
+      if (tlEl) tlEl.removeAttribute('data-duration');
+    } catch (e) { console.warn('Analyze failed', e); }
+  })();
+
+  // Prepare per-lane audio in the background; switch from native audio to split when ready
+  (async () => {
+    try {
+      if (!state.mediaCtx) {
+        state.mediaCtx = new (window.AudioContext || window.webkitAudioContext)();
+        state.mediaMaster = state.mediaCtx.createGain();
+        state.mediaMaster.gain.value = 1;
+        state.mediaMaster.connect(state.mediaCtx.destination);
+      }
+      const res = await window.trimlab.prepareAudioTracks({ inputPath: filePath, sampleRate: 48000, channels: 2 }) || { tracks: [] };
+      const tracks = Array.isArray(res?.tracks) ? res.tracks : [];
+      state.splitEls = [];
+      state.splitGains = [];
+      for (let i=0;i<tracks.length;i++){
+        const el = document.createElement('audio');
+        el.preload = 'auto'; el.muted = false; el.volume = 1; el.src = 'file:///' + String(tracks[i]).replace(/\\/g,'/');
+        const src = state.mediaCtx.createMediaElementSource(el);
+        const g = state.mediaCtx.createGain(); g.gain.value = 1;
+        src.connect(g); g.connect(state.mediaMaster);
+        state.splitEls.push(el);
+        state.splitGains.push(g);
+      }
+      // If we're currently playing, align and start split audio
+      try {
+        const v = state.videoEngine?.getMediaElement?.();
+        const isPlaying = !!state.videoEngine?.isPlaying?.();
+        const cur = (v?.currentTime || 0);
+        if (isPlaying && Array.isArray(state.splitEls) && state.splitEls.length) {
+          await state.mediaCtx?.resume?.();
+          for (const el of state.splitEls) { try { el.currentTime = cur; await el.play(); } catch {} }
+        }
+        // Mute video element now that split audio path is available
+        try { if (v) v.muted = true; } catch {}
+      } catch {}
+    } catch (e) { console.warn('prepareAudioTracks failed', e); }
+  })();
+
+  // Start MP4Box demuxer in the background (not required for native playback)
+  (async () => {
+    try {
+      let MP4BoxMod = null;
+      try { MP4BoxMod = await import('../node_modules/mp4box/dist/mp4box.all.js'); } catch (e) { console.error('Failed to load MP4Box module', e); }
+      state.demuxer = new MP4Demuxer(filePath, MP4BoxMod);
+      state.demuxer.onReady = (info) => {
+        state.videoEngine?.onDemuxReady(info, state.demuxer);
+        const vtrack = info.tracks.find(t => t.type === 'video') || info.tracks.find(t => t.video);
+        state.demuxer.onSamples = (id, samples) => {
+          if (vtrack && id === vtrack.id) state.videoEngine.onSamples(id, samples);
+        };
+      };
+      state.demuxer.onError = (err) => { console.error('Demux error', err); };
+      state.demuxer.start();
+    } catch {}
+  })();
 }
 
 function ensureVideoLane(name){
@@ -606,19 +659,22 @@ async function renderAudioLanesFromMeta(info, filePath) {
   // bind divider handlers for new lanes
   if (setupTooltips.bindDividerHandlers) setupTooltips.bindDividerHandlers(container);
   try { bindMuteSoloHandlers(container); } catch {}
-  // Generate waveforms per stream
+  // Generate waveforms per stream in the background so UI is responsive
   for (let i=0;i<streams.length;i++){
-    try{
-      const { outPath } = await window.trimlab.generateWaveform({ inputPath: filePath, streamIndex: i, width: 1200, height: 180 });
-      const row = container.children[i];
-      const top = row?.querySelector('.wave-img.top');
-      const bottom = row?.querySelector('.wave-img.bottom');
-      const url = `file:///${outPath.replace(/\\/g,'/')}?v=${Date.now()}`;
-      if (top) top.style.backgroundImage = `url('${url}')`;
-      if (bottom) bottom.style.backgroundImage = `url('${url}')`;
-      // rely on CSS for mirroring (no inline transform)
-      row.querySelectorAll('.wave-img').forEach(el => el.style.removeProperty('transform'));
-    }catch(e){ console.warn('Waveform generation failed for stream', i, e); }
+    (async (idx)=>{
+      try{
+        const { outPath } = await window.trimlab.generateWaveform({ inputPath: filePath, streamIndex: idx, width: 1200, height: 180 });
+        // Ignore if file has changed
+        if (state.filePath !== filePath) return;
+        const row = container.children[idx];
+        const top = row?.querySelector('.wave-img.top');
+        const bottom = row?.querySelector('.wave-img.bottom');
+        const url = `file:///${outPath.replace(/\\/g,'/')}?v=${Date.now()}`;
+        if (top) top.style.backgroundImage = `url('${url}')`;
+        if (bottom) bottom.style.backgroundImage = `url('${url}')`;
+        row.querySelectorAll('.wave-img').forEach(el => el.style.removeProperty('transform'));
+      }catch(e){ console.warn('Waveform generation failed for stream', idx, e); }
+    })(i);
   }
   // Ensure dim overlay matches the full scrollable height
   try {
@@ -877,6 +933,22 @@ function setupTransport() {
       } catch {}
       onEnded();
     }
+  });
+
+  // Global spacebar toggle for play/pause (ignore when typing in inputs)
+  window.addEventListener('keydown', (e) => {
+    try {
+      const key = e.code || e.key || '';
+      const isSpace = (key === 'Space' || key === ' ' || e.keyCode === 32);
+      if (!isSpace) return;
+      // Do not hijack space when focused in editable elements
+      const t = e.target;
+      const tag = (t && t.tagName) ? String(t.tagName).toLowerCase() : '';
+      const isEditable = (t && (t.isContentEditable || tag === 'input' || tag === 'textarea')); 
+      if (isEditable) return;
+      e.preventDefault();
+      document.getElementById('btnPlay')?.click();
+    } catch {}
   });
 }
 
