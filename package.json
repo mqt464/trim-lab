@@ -1,6 +1,6 @@
 {
   "name": "trim-lab",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Blazing-fast trimmer with WebCodecs (Option B) and precise export",
   "main": "electron/main.js",
   "scripts": {
@@ -24,14 +24,24 @@
       }
     ],
     "win": {
-      "target": ["nsis", "zip"]
+      "target": [
+        "nsis",
+        "zip"
+      ]
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.video"
     },
     "linux": {
-      "target": ["AppImage", "deb", "tar.gz"],
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
       "category": "Video"
     },
     "asarUnpack": [
