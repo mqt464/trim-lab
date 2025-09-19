@@ -1,0 +1,23 @@
+# Node/Electron
+node_modules/
+dist/
+dist-*/
+*.log
+npm-debug.log*
+*.tgz
+
+# Large local artifacts
+dist.zip
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Build caches
+out/
+coverage/
+cache/
+**/.cache/
+

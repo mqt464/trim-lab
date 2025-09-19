@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrimLab</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; connect-src 'self'; media-src 'self' blob: file:; worker-src 'self' blob:;"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="app-brand">
+        <div class="title">TrimLab</div>
+      </div>
+      <nav class="toolbar">
+        <button class="tbtn" id="btnOpen">Open</button>
+        <button class="tbtn primary" id="btnExport">Export</button>
+      </nav>
+    </header>
+
+    <div class="workspace">
+      <div id="exportProgress" class="export-progress">
+        <div class="export-progress-inner" role="status" aria-live="polite">
+          <div class="export-bar">
+            <div class="export-fill" style="width:0%"></div>
+            <div class="export-text" id="exportText">
+              <span id="exportPct2">0%</span>
+              <span class="sep">•</span>
+              <span id="exportEta2">ETA 00:00</span>
+            </div>
+          </div>
+          <div class="export-label"><span id="exportPct">0%</span> • <span id="exportEta">ETA 00:00</span><button id="exportCancel" class="export-cancel" title="Cancel export">Cancel</button></div>
+        </div>
+      </div>
+      <section class="center">
+        <div class="viewers">
+          <div class="viewer">
+            <div class="head">Program</div>
+            <div class="frame">
+              <canvas id="videoCanvas"></canvas>
+              <div id="dropHint" class="drop-hint">
+                Drop an .mp4 here or press Ctrl+O
+              </div>
+            </div>
+            <div class="time" id="timeLabel">00:00:00:00</div>
+          </div>
+        </div>
+        <div class="transport">
+          <button class="tbtn play" id="btnPlay">Play</button>
+          <div class="spacer"></div>
+          <div class="timecode" id="transportTime">00:00:00.00</div>
+        </div>
+      </section>
+
+      <section class="timeline" data-duration="30s" data-tool="select">
+        <div class="ruler">
+          <div class="r-tool"></div>
+          <div class="r-gutter"><div class="r-label"></div></div>
+          <div class="r-lane">
+            <div class="r-span">
+              <div class="master-range" aria-label="Master export range">
+                <div class="handle in" data-tip="Master In (drag)"></div>
+                <div class="range-fill" aria-hidden="true"></div>
+                <div class="handle out" data-tip="Master Out (drag)"></div>
+              </div>
+
+              <div class="playhead"></div>
+            </div>
+          </div>
+        </div>
+        <div class="tracks">
+          <div class="master-dim">
+            <div class="dim left"></div>
+            <div class="dim right"></div>
+          </div>
+          <div id="videoLanesContainer"></div>
+          <div id="audioLanesContainer"></div>
+        </div>
+      </section>
+      <footer class="footer">
+        <div class="clip-info">
+          <span class="name" id="footerName">No file</span>
+          <span class="range"
+            >Range <strong id="footerIn">0:00</strong>-<strong id="footerOut"
+              >0:30</strong
+            ></span
+          >
+          <span class="length"
+            >Length <strong id="footerLen">0:30</strong></span
+          >
+          <span class="mode"
+            >Export <strong id="footerMode">Precise</strong></span
+          >
+        </div>
+      </footer>
+    </div>
+
+    <div id="__float_tip" class="float-tip" style="display: none"></div>
+    <div id="__scrub_preview" class="scrub-preview" style="display: none"></div>
+
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>
+
