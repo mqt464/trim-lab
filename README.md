@@ -24,35 +24,6 @@ copy or precise re-encode.
 - Node.js 20+ and npm
 - Windows, macOS, or Linux
 
-## Development
-
-```bash
-npm install
-npm run dev
-```
-
-## Build
-
-```bash
-npm run build
-```
-
-Build artifacts are written to `dist/`.
-
-## Troubleshooting
-
-- Windows build error about symbolic links in winCodeSign:
-  enable Developer Mode or run the build from an elevated shell, then retry.
-- If an export fails, check the in and out range, then retry with Precise mode.
-
-## Project structure
-
-- `electron/` main and preload processes
-- `renderer/` UI and app logic
-- `renderer/engine/` playback and demux helpers
-- `common/` shared IPC names and enums
-- `scripts/` dev tooling
-
 ## Changelog
 
 All notable changes:
