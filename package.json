@@ -1,6 +1,6 @@
 {
   "name": "trim-lab",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "description": "Blazing-fast trimmer with WebCodecs (Option B) and precise export",
   "main": "electron/main.js",
   "scripts": {
