@@ -28,30 +28,29 @@
             <div class="export-fill" style="width:0%"></div>
             <div class="export-text" id="exportText">
               <span id="exportPct2">0%</span>
-              <span class="sep">•</span>
+              <span class="sep"></span>
               <span id="exportEta2">ETA 00:00</span>
             </div>
           </div>
-          <div class="export-label"><span id="exportPct">0%</span> • <span id="exportEta">ETA 00:00</span><button id="exportCancel" class="export-cancel" title="Cancel export">Cancel</button></div>
+          <div class="export-label"><span id="exportPct">0%</span><span class="sep"></span><span id="exportEta">ETA 00:00</span><button id="exportCancel" class="export-cancel" data-tip="Cancel export">Cancel</button></div>
         </div>
       </div>
       <section class="center">
         <div class="viewers">
           <div class="viewer">
-            <div class="head">Program</div>
             <div class="frame">
               <canvas id="videoCanvas"></canvas>
               <div id="dropHint" class="drop-hint">
                 Drop an .mp4 here or press Ctrl+O
               </div>
             </div>
-            <div class="time" id="timeLabel">00:00:00:00</div>
+            <div class="time" id="timeLabel">00:00:00.000</div>
           </div>
         </div>
         <div class="transport">
           <button class="tbtn play" id="btnPlay">Play</button>
           <div class="spacer"></div>
-          <div class="timecode" id="transportTime">00:00:00.00</div>
+          <div class="timecode" id="transportTime" hidden>00:00:00.00</div>
         </div>
       </section>
 
@@ -104,4 +103,6 @@
     <script type="module" src="renderer.js"></script>
   </body>
 </html>
+
+
 

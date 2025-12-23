@@ -1,5 +1,27 @@
 const { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage } = require('electron');
 const path = require('path');
+let IPC = {
+  openFileDialog: 'open-file-dialog',
+  fileOpenedFromOS: 'file-opened-from-os',
+  analyze: 'analyze-file',
+  export: 'export-clip',
+  exportProgress: 'export-progress',
+  exportCancel: 'export-cancel',
+  revealItem: 'reveal-item',
+  readFileChunks: 'read-file-chunks',
+  fileChunk: 'file-chunk',
+  fileChunkEnd: 'file-chunk-end',
+  cancelReadFile: 'cancel-read-file',
+  generateWaveform: 'generate-waveform',
+  generateThumbnails: 'generate-thumbnails',
+  prepareAudioTracks: 'prepare-audio-tracks'
+};
+let ExportMode = { Precise: 'precise', Copy: 'copy' };
+try {
+  const shared = require(path.join(__dirname, '..', 'common', 'ipc.js'));
+  if (shared?.IPC) IPC = shared.IPC;
+  if (shared?.ExportMode) ExportMode = shared.ExportMode;
+} catch {}
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const { spawn } = require('child_process');
@@ -34,28 +56,55 @@ function binPathFromStatic(mod, fallbackName){
   }
 }
 
-const IPC = {
-  openFileDialog: 'open-file-dialog',
-  fileOpenedFromOS: 'file-opened-from-os',
-  analyze: 'analyze-file',
-  export: 'export-clip',
-  exportProgress: 'export-progress',
-  exportCancel: 'export-cancel',
-  revealItem: 'reveal-item',
-  readFileChunks: 'read-file-chunks',
-  fileChunk: 'file-chunk',
-  fileChunkEnd: 'file-chunk-end',
-  cancelReadFile: 'cancel-read-file'
-};
-const ExportMode = { Precise: 'precise', Copy: 'copy' };
-const GEN_WAVEFORM = 'generate-waveform';
-const GEN_THUMBS = 'generate-thumbnails';
-const PREP_AUDIO = 'prepare-audio-tracks';
+let cachePruneScheduled = false;
+function scheduleCachePrune() {
+  if (cachePruneScheduled) return;
+  cachePruneScheduled = true;
+  setTimeout(() => {
+    pruneUserCache().catch(() => {});
+  }, 3000);
+}
+
+async function pruneUserCache() {
+  const base = path.join(app.getPath('userData'), 'cache');
+  await pruneCacheDir(base, { maxAgeMs: 7 * 24 * 60 * 60 * 1000, maxFiles: 200 });
+  await pruneCacheDir(path.join(base, 'atracks'), { maxAgeMs: 3 * 24 * 60 * 60 * 1000, maxFiles: 200 });
+}
+
+async function pruneCacheDir(dir, opts) {
+  const maxAgeMs = opts?.maxAgeMs ?? 0;
+  const maxFiles = opts?.maxFiles ?? 0;
+  let entries = [];
+  try {
+    entries = await fsPromises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const fullPath = path.join(dir, entry.name);
+    try {
+      const stat = await fsPromises.stat(fullPath);
+      files.push({ path: fullPath, mtimeMs: stat.mtimeMs });
+    } catch {}
+  }
+  if (!files.length) return;
+  const now = Date.now();
+  const stale = maxAgeMs > 0 ? files.filter(f => (now - f.mtimeMs) > maxAgeMs) : [];
+  const byRecent = files.slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const overflow = maxFiles > 0 ? byRecent.slice(maxFiles) : [];
+  const toRemove = new Set([...stale, ...overflow].map(f => f.path));
+  for (const p of toRemove) {
+    try { await fsPromises.rm(p, { force: true }); } catch {}
+  }
+}
 
 let mainWindow;
 const isDev = !app.isPackaged;
 const readStreams = new Map(); // key: filePath, value: ReadStream
 const pendingOpenFiles = []; // macOS open-file queue before window ready
+const isSenderAlive = (sender) => !!(sender && !sender.isDestroyed());
 
 function createWindow() {
   // Build an in-memory blue square icon to replace Electron's default logo (Windows/Linux)
@@ -94,7 +143,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(app.getAppPath(), 'electron', 'preload.js')
+      preload: path.join(__dirname, 'preload.js')
     },
     title: 'TrimLab',
     // Hide menubar unless Alt is pressed (Windows/Linux). We also fully remove below.
@@ -104,6 +153,13 @@ function createWindow() {
 
   const indexPath = path.join(app.getAppPath(), 'renderer', 'index.html');
   mainWindow.loadFile(indexPath);
+  mainWindow.on('closed', () => {
+    for (const rs of readStreams.values()) {
+      try { rs.destroy(); } catch {}
+    }
+    readStreams.clear();
+    mainWindow = null;
+  });
 
   // Enable DevTools toggles from the window even without a menu
   // Ctrl+Shift+I (or Cmd+Opt+I on macOS) and F12
@@ -171,6 +227,7 @@ if (!isDev) {
 
     app.whenReady().then(() => {
       createWindow();
+      scheduleCachePrune();
       const argvFile = process.argv.find(a => /\.(mp4|mov|m4v)$/i.test(a));
       if (argvFile) {
         mainWindow.webContents.once('did-finish-load', () => {
@@ -202,6 +259,7 @@ if (!isDev) {
 
   app.whenReady().then(() => {
     createWindow();
+    scheduleCachePrune();
     const argvFile = process.argv.find(a => /\.(mp4|mov|m4v)$/i.test(a));
     if (argvFile) {
       mainWindow.webContents.once('did-finish-load', () => {
@@ -243,11 +301,22 @@ ipcMain.handle(IPC.analyze, async (_event, inputPath) => {
     const args = ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath];
     const ffprobe = getFFprobePath();
     const proc = spawn(ffprobe, args, { windowsHide: true });
+    let settled = false;
     let out = '';
     let err = '';
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    };
     proc.stdout.on('data', d => (out += d.toString()))
     proc.stderr.on('data', d => (err += d.toString()))
+    proc.on('error', (spawnErr) => {
+      fail(spawnErr?.message || 'ffprobe failed to start');
+    });
     proc.on('close', code => {
+      if (settled) return;
+      settled = true;
       if (code === 0) {
         try {
           resolve(JSON.parse(out));
@@ -264,24 +333,45 @@ ipcMain.handle(IPC.analyze, async (_event, inputPath) => {
 // IPC: Read file in chunks and stream to renderer
 ipcMain.on(IPC.readFileChunks, (event, { filePath, chunkSize = 1024 * 1024 }) => {
   try {
+    if (!isSenderAlive(event.sender)) return;
     const rs = fs.createReadStream(filePath, { highWaterMark: chunkSize });
     readStreams.set(filePath, rs);
     let offset = 0;
+    const safeSend = (channel, payload) => {
+      if (!isSenderAlive(event.sender)) {
+        try { rs.destroy(); } catch {}
+        readStreams.delete(filePath);
+        return false;
+      }
+      try { event.sender.send(channel, payload); } catch {
+        try { rs.destroy(); } catch {}
+        readStreams.delete(filePath);
+        return false;
+      }
+      return true;
+    };
     rs.on('data', (chunk) => {
       const arrayBuf = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-      event.sender.send(IPC.fileChunk, { filePath, offset, buffer: arrayBuf, length: chunk.length });
+      if (!safeSend(IPC.fileChunk, { filePath, offset, buffer: arrayBuf, length: chunk.length })) return;
       offset += chunk.length;
     });
     rs.on('end', () => {
-      event.sender.send(IPC.fileChunkEnd, { filePath, size: offset });
+      safeSend(IPC.fileChunkEnd, { filePath, size: offset });
       readStreams.delete(filePath);
     });
     rs.on('error', (err) => {
-      event.sender.send(IPC.fileChunkEnd, { filePath, error: err.message });
+      safeSend(IPC.fileChunkEnd, { filePath, error: err.message });
+      readStreams.delete(filePath);
+    });
+    rs.on('close', () => {
       readStreams.delete(filePath);
     });
   } catch (e) {
-    event.sender.send(IPC.fileChunkEnd, { filePath, error: String(e) });
+    try {
+      if (isSenderAlive(event.sender)) {
+        event.sender.send(IPC.fileChunkEnd, { filePath, error: String(e) });
+      }
+    } catch {}
   }
 });
 
@@ -396,7 +486,7 @@ function buildExportArgs({ inputPath, inSec, outSec, mode, outPath, audioMod }) 
 
 // IPC: Export
 ipcMain.handle(IPC.export, async (_event, payload) => {
-  const { inputPath, inSec, outSec, mode = ExportMode.Precise, reveal = true, audioGainsDb = [], audioMute = [], audioSolo = [] } = payload;
+  const { inputPath, inSec, outSec, mode = ExportMode.Precise, reveal = true, audioCount: audioCountHint, audioGainsDb = [], audioMute = [], audioSolo = [] } = payload;
   const outDir = await ensureOutDir();
   const inTag = Math.floor((inSec ?? 0) * 1000);
   const outTag = Math.floor((outSec ?? 0) * 1000);
@@ -416,19 +506,38 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
   const outPath = uniqueOutPath(outDir, outName);
 
   // Determine audio stream count
-  let audioCount = 0;
-  try {
-    const argsProbe = ['-v', 'error', '-print_format', 'json', '-show_streams', inputPath];
-    const ffprobe = getFFprobePath();
-    const info = await new Promise((resolve, reject) => {
-      const p = spawn(ffprobe, argsProbe, { windowsHide: true });
-      let out=''; let err='';
-      p.stdout.on('data', d=> out += d.toString());
-      p.stderr.on('data', d=> err += d.toString());
-      p.on('close', c => c===0 ? resolve(JSON.parse(out||'{}')) : reject(new Error(err||`ffprobe exited ${c}`)));
-    });
-    audioCount = (info?.streams||[]).filter(s=> s.codec_type==='audio').length;
-  } catch {}
+  let audioCount = (typeof audioCountHint === 'number' && Number.isFinite(audioCountHint)) ? audioCountHint : null;
+  if (audioCount == null) {
+    try {
+      const argsProbe = ['-v', 'error', '-print_format', 'json', '-show_streams', inputPath];
+      const ffprobe = getFFprobePath();
+      const info = await new Promise((resolve, reject) => {
+        const p = spawn(ffprobe, argsProbe, { windowsHide: true });
+        let settled = false;
+        let out=''; let err='';
+        const fail = (message) => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(message));
+        };
+        p.stdout.on('data', d=> out += d.toString());
+        p.stderr.on('data', d=> err += d.toString());
+        p.on('error', (spawnErr) => {
+          fail(spawnErr?.message || 'ffprobe failed to start');
+        });
+        p.on('close', c => {
+          if (settled) return;
+          settled = true;
+          if (c === 0) resolve(JSON.parse(out||'{}'));
+          else reject(new Error(err||`ffprobe exited ${c}`));
+        });
+      });
+      audioCount = (info?.streams||[]).filter(s=> s.codec_type==='audio').length;
+    } catch {
+      audioCount = 0;
+    }
+  }
+  if (audioCount == null) audioCount = 0;
 
   const hasMods = (audioCount>0) && (
     (audioGainsDb||[]).some(v => Math.abs(v||0) > 0.0001) ||
@@ -445,8 +554,17 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
     const ffmpeg = getFFmpegPath();
     const proc = spawn(ffmpeg, args, { windowsHide: true });
     currentExportProc = proc;
+    currentExportCanceled = false;
+    let settled = false;
     let err = '';
     const started = Date.now();
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      currentExportProc = null;
+      try { mainWindow?.webContents?.send(IPC.exportProgress, { error: message }); } catch {}
+      reject(new Error(message));
+    };
     const sendProgress = (percent, outSecElapsed) => {
       try {
         const elapsed = Math.max(0, (Date.now() - started) / 1000);
@@ -476,7 +594,18 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
       if (seconds>0){ const pct = (seconds/total)*100; sendProgress(pct, seconds); }
     });
     proc.stderr.on('data', d => { err += d.toString(); });
+    proc.on('error', (spawnErr) => {
+      fail(spawnErr?.message || 'ffmpeg failed to start');
+    });
     proc.on('close', code => {
+      if (settled) return;
+      settled = true;
+      currentExportProc = null;
+      if (currentExportCanceled) {
+        try { mainWindow?.webContents?.send(IPC.exportProgress, { done: true, canceled: true }); } catch {}
+        resolve({ canceled: true });
+        return;
+      }
       if (code === 0) {
         try { mainWindow?.webContents?.send(IPC.exportProgress, { percent: 100, eta: '00:00', done: true, outPath }); } catch {}
         if (reveal) shell.showItemInFolder(outPath);
@@ -490,8 +619,15 @@ ipcMain.handle(IPC.export, async (_event, payload) => {
 });
 
 let currentExportProc = null;
+let currentExportCanceled = false;
 ipcMain.handle(IPC.exportCancel, async () => {
-  try { currentExportProc?.kill(); currentExportProc = null; return { canceled: true }; }
+  try {
+    currentExportCanceled = true;
+    currentExportProc?.kill();
+    currentExportProc = null;
+    try { mainWindow?.webContents?.send(IPC.exportProgress, { done: true, canceled: true }); } catch {}
+    return { canceled: true };
+  }
   catch (e) { return { canceled: false, error: String(e) }; }
 });
 
@@ -501,7 +637,7 @@ ipcMain.handle(IPC.revealItem, (_event, filePath) => {
 });
 
 // IPC: Generate waveform PNG using ffmpeg showwavespic (fallback for MVP)
-ipcMain.handle(GEN_WAVEFORM, async (_event, opts) => {
+ipcMain.handle(IPC.generateWaveform, async (_event, opts) => {
   const { inputPath, streamIndex = 0, width = 1000, height = 90, color = '9af27d', startSec = null, endSec = null, gainDb = 0 } = opts || {};
   const userDir = app.getPath('userData');
   const outDir = path.join(userDir, 'cache');
@@ -535,15 +671,29 @@ ipcMain.handle(GEN_WAVEFORM, async (_event, opts) => {
   ];
   await new Promise((resolve, reject) => {
     const proc = spawn(ffmpeg, args, { windowsHide: true });
+    let settled = false;
     let err = '';
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    };
     proc.stderr.on('data', d => err += d.toString());
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`)));
+    proc.on('error', (spawnErr) => {
+      fail(spawnErr?.message || 'ffmpeg failed to start');
+    });
+    proc.on('close', code => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolve();
+      else reject(new Error(err || `ffmpeg exited ${code}`));
+    });
   });
   return { outPath };
 });
 
 // IPC: Generate thumbnail sprite strip using ffmpeg
-ipcMain.handle(GEN_THUMBS, async (_event, opts) => {
+ipcMain.handle(IPC.generateThumbnails, async (_event, opts) => {
   const { inputPath, cols = 10, width = 320, height = -1 } = opts || {};
   const userDir = app.getPath('userData');
   const outDir = path.join(userDir, 'cache');
@@ -561,35 +711,63 @@ ipcMain.handle(GEN_THUMBS, async (_event, opts) => {
   ];
   await new Promise((resolve, reject) => {
     const proc = spawn(ffmpeg, args, { windowsHide: true });
+    let settled = false;
     let err = '';
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    };
     proc.stderr.on('data', d => err += d.toString());
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`)));
+    proc.on('error', (spawnErr) => {
+      fail(spawnErr?.message || 'ffmpeg failed to start');
+    });
+    proc.on('close', code => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolve();
+      else reject(new Error(err || `ffmpeg exited ${code}`));
+    });
   });
   return { outPath };
 });
 
 // IPC: Demux each audio track to its own WAV file for per-lane playback
-ipcMain.handle(PREP_AUDIO, async (_event, opts) => {
-  const { inputPath, sampleRate = 48000, channels = 2 } = opts || {};
+ipcMain.handle(IPC.prepareAudioTracks, async (_event, opts) => {
+  const { inputPath, sampleRate = 48000, channels = 2, audioStreams = null } = opts || {};
   if (!inputPath) throw new Error('inputPath required');
-  // Probe streams to count audio tracks
-  const info = await new Promise((resolve, reject) => {
-    const args = ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath];
-    const ffprobe = getFFprobePath();
-    const proc = spawn(ffprobe, args, { windowsHide: true });
-    let out = '';
-    let err = '';
-    proc.stdout.on('data', d => (out += d.toString()))
-    proc.stderr.on('data', d => (err += d.toString()))
-    proc.on('close', code => {
-      if (code === 0) {
-        try { resolve(JSON.parse(out)); } catch (e) { reject(new Error('Failed to parse ffprobe JSON')) }
-      } else {
-        reject(new Error(err || `ffprobe exited ${code}`));
-      }
+  // Probe streams to count audio tracks unless metadata was provided
+  let streams = Array.isArray(audioStreams) ? audioStreams.filter(s => s?.codec_type === 'audio') : null;
+  if (!streams || !streams.length) {
+    const info = await new Promise((resolve, reject) => {
+      const args = ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath];
+      const ffprobe = getFFprobePath();
+      const proc = spawn(ffprobe, args, { windowsHide: true });
+      let settled = false;
+      let out = '';
+      let err = '';
+      const fail = (message) => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(message));
+      };
+      proc.stdout.on('data', d => (out += d.toString()))
+      proc.stderr.on('data', d => (err += d.toString()))
+      proc.on('error', (spawnErr) => {
+        fail(spawnErr?.message || 'ffprobe failed to start');
+      });
+      proc.on('close', code => {
+        if (settled) return;
+        settled = true;
+        if (code === 0) {
+          try { resolve(JSON.parse(out)); } catch (e) { reject(new Error('Failed to parse ffprobe JSON')) }
+        } else {
+          reject(new Error(err || `ffprobe exited ${code}`));
+        }
+      });
     });
-  });
-  const streams = (info?.streams || []).filter(s => s.codec_type === 'audio');
+    streams = (info?.streams || []).filter(s => s.codec_type === 'audio');
+  }
   if (!streams.length) return { tracks: [] };
   const userDir = app.getPath('userData');
   const outDir = path.join(userDir, 'cache', 'atracks');
@@ -614,6 +792,9 @@ ipcMain.handle(PREP_AUDIO, async (_event, opts) => {
       const proc = spawn(ffmpeg, args, { windowsHide: true });
       let err = '';
       proc.stderr.on('data', d => err += d.toString());
+      proc.on('error', (spawnErr) => {
+        reject(new Error(spawnErr?.message || 'ffmpeg failed to start'));
+      });
       proc.on('close', code => code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`)));
     });
     tracks.push(outPath);

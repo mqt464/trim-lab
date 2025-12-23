@@ -1,4 +1,4 @@
-// MP4Demuxer streams file chunks into MP4Box to expose tracks and samples
+// Legacy WebCodecs pipeline: MP4Demuxer streams file chunks into MP4Box to expose tracks and samples.
 
 export class MP4Demuxer {
   constructor(filePath, mp4boxLib) {
@@ -12,6 +12,8 @@ export class MP4Demuxer {
     this._size = 0;
     this._extracted = new Set();
     this._continuous = new Set();
+    this._unsubFileChunk = null;
+    this._unsubFileChunkEnd = null;
   }
 
   start() {
@@ -54,7 +56,7 @@ export class MP4Demuxer {
 
     // Start chunked reads from main
     // Default 1MB chunks for now
-    window.trimlab.onFileChunk((msg) => {
+    this._unsubFileChunk = window.trimlab.onFileChunk((msg) => {
       if (msg.filePath !== this.filePath) return;
       try {
         const MP4BoxBuffer = this._mp4boxLib?.MP4BoxBuffer;
@@ -70,7 +72,7 @@ export class MP4Demuxer {
         this._emitError(e);
       }
     });
-    window.trimlab.onFileChunkEnd((msg) => {
+    this._unsubFileChunkEnd = window.trimlab.onFileChunkEnd((msg) => {
       if (msg.filePath !== this.filePath) return;
       if (msg.error) this._emitError(new Error(msg.error));
       else mp4box.flush();
@@ -131,6 +133,10 @@ export class MP4Demuxer {
 
   dispose() {
     window.trimlab.cancelReadFile(this.filePath);
+    try { if (this._unsubFileChunk) this._unsubFileChunk(); } catch {}
+    try { if (this._unsubFileChunkEnd) this._unsubFileChunkEnd(); } catch {}
+    this._unsubFileChunk = null;
+    this._unsubFileChunkEnd = null;
     try { this.mp4box?.flush(); } catch {}
     this.mp4box = null;
   }

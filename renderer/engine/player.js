@@ -47,10 +47,18 @@ export class VideoEngine {
         v.style.objectFit = 'contain';
         v.style.zIndex = '2';
         v.style.display = 'block';
+        v.style.pointerEvents = 'none';
         v.preload = 'auto';
         v.playsInline = true;
+        v.setAttribute('playsinline', '');
+        v.setAttribute('webkit-playsinline', '');
         v.controls = false;
+        v.controlsList = 'nodownload noplaybackrate noremoteplayback nofullscreen';
+        v.setAttribute('controlslist', 'nodownload noplaybackrate noremoteplayback nofullscreen');
         v.disablePictureInPicture = true;
+        v.disableRemotePlayback = true;
+        v.setAttribute('disablepictureinpicture', '');
+        v.setAttribute('disableremoteplayback', '');
         v.style.backgroundColor = 'black';
         // Do not force mute; keep audible fallback via native element if WebAudio engines are not active
         v.muted = false;
@@ -310,16 +318,17 @@ export class VideoEngine {
     const resumeOpt = opts.resume ?? 'auto';
     const shouldResume = resumeOpt === true || (resumeOpt === 'auto' && wasPlaying);
     const wait = opts.wait ?? !wasPlaying;
+    const precise = !!opts.precise;
     try {
       // Aggressively nudge the pipeline for near-instant preview
       if (!wasPlaying) { try { this.videoEl.pause(); } catch {} }
-      if (typeof this.videoEl.fastSeek === 'function') {
+      if (!precise && typeof this.videoEl.fastSeek === 'function') {
         try { this.videoEl.fastSeek(target); } catch { this.videoEl.currentTime = target; }
       } else {
         this.videoEl.currentTime = target;
       }
       // Briefly play to force a frame to render ASAP on some platforms
-      if (!wasPlaying) { try { await this.videoEl.play(); } catch {} }
+      if (!wasPlaying && !precise) { try { await this.videoEl.play(); } catch {} }
       if (wait) {
         await new Promise((resolve) => {
           let done = false;
@@ -335,6 +344,11 @@ export class VideoEngine {
           // Safety timeout in case neither fires (corrupted file etc.)
           setTimeout(() => { if (!done) { done = true; resolve(); } }, 300);
         });
+        if (precise && 'requestVideoFrameCallback' in this.videoEl) {
+          await new Promise((resolve) => {
+            try { this.videoEl.requestVideoFrameCallback(() => resolve()); } catch { resolve(); }
+          });
+        }
       }
       if (shouldResume) { try { await this.videoEl.play(); } catch {} }
       else if (!wasPlaying) { try { this.videoEl.pause(); } catch {} }
